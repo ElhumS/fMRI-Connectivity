@@ -5,25 +5,19 @@ library(Matrix)
 library(oro.nifti)
 library(AnalyzeFMRI)
 
-#library(foreach)
-#library(doParallel)
-#library(abind)
-#library(bigmemory)
-#library(ff)
-
 ########################
 ######## Inputs ########
 ########################
-sigthresh <- 0.001 #edit this later
-clusterthresh <- 10 #edit this later
-ROI_file <- 'E:/Patients/CyMu_01_01/fMRI_Preprocessing/T1/t1_mpr_ns_sag_pat2_iso_9_170226/sphere_5-20_1_-13.nii'
-TR <- 1.99
-noise_basis_file <- 'E:/Patients/CyMu_01_01/fMRI_Preprocessing/rp/noise_basis6.txt'
-folder_with_data <- 'E:/Patients/CyMu_01_01/fMRI_Preprocessing/safilt_ufmri'
-output_direc <- 'E:/Patients/CyMu_01_01/fMRI_Analysis/'
-template_output_file <- 'E:/Patients/CyMu_01_01/fMRI_Preprocessing/safilt_ufmri/safilt_uf2016-01-08_16-23-163038-00006-00006-1.nii'
-wm_timecourse <- 'E:/Patients/CyMu_01_01/fMRI_Preprocessing/T1/t1_mpr_ns_sag_pat2_iso_9_170226/c2_timecourse.txt'
-csf_timecourse <- 'E:/Patients/CyMu_01_01/fMRI_Preprocessing/T1/t1_mpr_ns_sag_pat2_iso_9_170226/c3_timecourse.txt'
+sigthresh <- 0.001 
+clusterthresh <- 10 
+ROI_file <- 'E:/Patients/Sub_01/fMRI_Preprocessing/T1/t1.nii'
+TR <- 1.99 # in seconds
+noise_basis_file <- 'E:/Patients/Sub_01/fMRI_Preprocessing/rp/noise_basis6.txt'
+folder_with_data <- 'E:/Patients/Sub_01/fMRI_Preprocessing/safilt_ufmri'
+output_direc <- 'E:/Patients/Sub_01/fMRI_Analysis/'
+template_output_file <- 'E:/Patients/Sub_01/fMRI_Preprocessing/safilt_ufmri/safilt_ufmri.nii'
+wm_timecourse <- 'E:/Patients/Sub_01/fMRI_Preprocessing/WM/wm_timecourse.txt'
+csf_timecourse <- 'E:/Patients/Sub_01/fMRI_Preprocessing/CSF/csf_timecourse.txt'
 
 ##########################
 ######## Get Data ########
@@ -156,7 +150,7 @@ for (i in 1:dx){
   for (j in 1:dy){
     for (k in 1:dz){
       x1 <- cor.test(x = t(tc_focus),y = hplp_d_timecourse[i,j,k,],alternative = 'greater',na.action = 'na.omit')
-      final_cor_pos[i,j,k,] <-x1$p.value #need to change to tvalue
+      final_cor_pos[i,j,k,] <-x1$p.value
     }}}
 ### negative
 final_cor_neg <- array(0,c(dim(hplp_d_timecourse)[1],dim(hplp_d_timecourse)[2],dim(hplp_d_timecourse)[3],dim(hplp_d_timecourse)[4]))
@@ -164,14 +158,14 @@ for (i in 1:dx){
   for (j in 1:dy){
     for (k in 1:dz){
       x2 <- cor.test(x = t(tc_focus),y = hplp_d_timecourse[i,j,k,],alternative = 'less',na.action = 'na.omit')
-      final_cor_neg[i,j,k,] <-x2$p.value #need to change to tvalue
+      final_cor_neg[i,j,k,] <-x2$p.value 
     }}}
 
 ###################################### 
 ######## Significance Testing  #######
 ######################################
 ## Find out where pvalues are <sigthresh ##
-sig_fz_cor_pos <- final_cor_pos[,,,1]#not looking over time, so (x,y,z,1)
+sig_fz_cor_pos <- final_cor_pos[,,,1]#not looking over time/dynamic, so (x,y,z,1)
 for (i in 1:dim(sig_fz_cor_pos)[1]) {
   for (j in 1:dim(sig_fz_cor_pos)[2]) {
     for (k in 1:dim(sig_fz_cor_pos)[3]) {
@@ -183,7 +177,7 @@ for (i in 1:dx) {
   for (j in 1:dy) {
     for (k in 1:dz) {
       if (isTRUE(final_cor_pos[i,j,k,1]<=sigthresh)) {
-        sig_fz_cor_pos[i,j,k] <- 1 #get rid of this bit so you can use real values
+        sig_fz_cor_pos[i,j,k] <- 1 
         print("Yup")} 
       else{
         sig_fz_cor_pos[i,j,k] <- 0
@@ -193,7 +187,7 @@ for (i in 1:dx) {
 sig_fz_cor_pos_cluster_thresh <- cluster.threshold(x = sig_fz_cor_pos,size.thr = clusterthresh)
 
 
-sig_fz_cor_neg <- final_cor_neg[,,,1]#not looking over time, so (x,y,z,1)
+sig_fz_cor_neg <- final_cor_neg[,,,1]#not looking over time/dynamic, so (x,y,z,1)
 for (i in 1:dim(sig_fz_cor_neg)[1]) {
   for (j in 1:dim(sig_fz_cor_neg)[2]) {
     for (k in 1:dim(sig_fz_cor_neg)[3]) {
