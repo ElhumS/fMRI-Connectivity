@@ -1,0 +1,427 @@
+
+##############################
+######## Inputs PreOp ########
+##############################
+coreg_ROI_file <- 'E:/PrePostHopf/PreSurgical/Sub_01/Parcellation/reslice_parcel_T1.nii' # parcellation file
+TR <- 1.99 # in seconds
+noise_basis_file <- 'E:/PrePostHopf/PreSurgical/Sub_01/rp/noise_basis6.txt'
+folder_with_data <- 'E:/PrePostHopf/PreSurgical/Sub_01/safilt_ufmri'
+output_direc <- 'E:/PrePostHopf/PreSurgical/Sub_01/FC'
+
+ROI_ROI_Connectivity <- function(coreg_ROI_file,TR,noise_basis_file,folder_with_data,output_direc){
+  
+  library(FIACH)
+  library(RNiftyReg)
+  library(pracma)
+  library(Matrix)
+  library(oro.nifti)
+  library(AnalyzeFMRI)
+  
+  ##########################
+  ######## Get Data ########
+  ##########################
+  ## safilt_ufmri data ##
+  confound_filename <- read.table(file = noise_basis_file,header = FALSE,sep = ' ')
+  files <- list.files(path = folder_with_data,pattern = '*.nii', full.names = TRUE)
+  func_files <- readNii(input = files, fourD = TRUE)
+  func_filename <- func_files[,,,1:dim(func_files)[4]]
+  
+  ## Take coregistered parcellation mask and make separate ROI files ##
+  coreg_ROIimg <- readNii(input = coreg_ROI_file, fourD = F)
+  
+  # Take each ROI and make new nii file
+  maxroi <- max(coreg_ROIimg)
+  C <- rep(paste(gsub('FC','',output_direc),'Parcellation/',sep = ''),maxroi) # filename for output
+  skippedROIs <-numeric()
+  for (e in 1:maxroi){ #3
+    A = array(0,c(dim(func_files)[1],dim(func_files)[2],dim(func_files)[3])) # empty output
+    coordin<-which(round(coreg_ROIimg) == e,arr.ind = T) # find roi number in mask
+    coordina<-matrix(coordin,nrow = dim(coordin)[1],ncol = dim(coordin)[2]) # make the coordinates into matrices
+    if (length(coordina)==0){
+      skippedROIs[e] <- e
+      next}
+    else{
+      for (bleep in 1:dim(coordina)[1]){
+        A[coordina[bleep,1],coordina[bleep,2],coordina[bleep,3]]=1 # turn those into 1's
+      }
+      Vfname <- paste(C[e],paste('roi',e,sep = ''),sep = '')
+      print(Vfname)
+      V <- writeNifti(file = Vfname,image = A,template = coreg_ROI_file) # output as binary nii file
+    }}
+  
+  ROI_file_names <- list.files(path = paste(gsub('FC','',output_direc),'Parcellation/',sep = ''),pattern = '^roi.*.nii', full.names = TRUE)
+  ROI_transform <- readNii(ROI_file_names,fourD = T)
+  
+  ###########################
+  ###### Detrending #########
+  ###########################
+  reshape <- matrix(func_filename, dim(func_filename)[1]*dim(func_filename)[2]*dim(func_filename)[3], byrow = F) # space x time
+  reshape2 <- t(reshape) ## time x space ##
+  
+  d_data <- detrend(x = reshape2, tt = 'linear')
+  d_timecourse <- array(t(d_data), dim=c(dim(func_filename)[1], dim(func_filename)[2], dim(func_filename)[3], dim(func_filename)[4]))
+  
+  #########################################
+  ######### Regressing out Noise ##########
+  #########################################
+  xx <- matrix(nrow = dim(d_timecourse)[4],ncol = 3) #constructing a linear quatratic
+  xx[,1] <- array(1,dim(d_timecourse)[4])
+  xx[,2] <- t(1:dim(d_timecourse)[4])/dim(d_timecourse)[4]
+  xx[,3] <- t((1:dim(d_timecourse)[4])^2)/dim(d_timecourse)[4]^2
+  
+  #wm_filename <- read.table(file = wm_timecourse,header = FALSE,sep = ' ')
+  #noise_wm_avg <- wm_filename
+  #noise_wm_demean <- noise_wm_avg-colMeans(noise_wm_avg)
+  
+  #csf_filename <- read.table(file = csf_timecourse,header = FALSE,sep = ' ')
+  #noise_csf_avg <- csf_filename
+  #noise_csf_demean <- noise_csf_avg-colMeans(noise_csf_avg)
+  
+  noise_avg <- confound_filename[1:dim(func_filename)[4],]
+  #noise_demean <- noise_avg-rowMeans(noise_avg)
+  
+  X <- cbind(xx,noise_avg) # not using csf or wm --> cbind(xx,noise_wm_demean,noise_csf_demean,noise_avg)
+  y <- d_timecourse
+  
+  y_regress_ss <- function(y,X){   #given the same name as related function in matlab
+    n <- dim(X)[1]
+    ncolX <- dim(X)[2]
+    signature(qr = "sparseQR") # makes it 'economy-size decomposition'
+    z <- qr(X,LAPACK=T)
+    Q <- qr.Q(z)
+    R <- qr.R(z)
+    perm <- z$pivot
+    p <- sum(abs(diag(R)) > max(n,ncolX)*eps(R[1]))
+    
+    if (p < ncolX) { #previously used isTRUE()
+      R <- R[1:p,1:p]
+      Q <- Q[,1:p]
+      perm <- perm[1:p]
+    }
+    
+    b <- zeros(ncolX,1)
+    b[perm] <- mldivide(A = R,B = (t(Q)%*%y))
+    yhat <- as.matrix(X)%*%b
+    r <- y-yhat
+    return(r)
+  }
+  
+  V0Cov <- array(0,dim(y))
+  for (i in 1:dim(y)[1]){
+    for (j in 1:dim(y)[2]){
+      for (k in 1:dim(y)[3]){
+        res <- y_regress_ss(drop(y[i,j,k,]),X)
+        V0Cov[i,j,k,] <- res
+      }}}
+  V0Cov[is.nan(V0Cov)]=0
+  
+  #########################################
+  #### Bandpass filter data 0.01-0.1Hz ####
+  #########################################
+  
+  ## high pass ##
+  hp <- array(0,c(dim(func_filename)[1],dim(func_filename)[2],dim(func_filename)[3],dim(func_filename)[4]))
+  for (i in 1:dim(V0Cov)[1]){
+    for (j in 1:dim(V0Cov)[2]){
+      for (k in 1:dim(V0Cov)[3]){
+        hp[i,j,k,] <- highPass(V0Cov[i,j,k,],freq = 100,tr = TR)
+      }
+    }
+  }
+  
+  ## low pass ##
+  kern <- kaiserWin(fl=0.1,tw=.025,sf=1/TR,d.sa=70,d.pbr=.1,type="low")
+  hplp_d_timecourse <- array(0,c(dim(hp)[1],dim(hp)[2],dim(hp)[3],dim(hp)[4]))
+  for (i in 1:dim(hp)[1]){
+    for (j in 1:dim(hp)[2]){
+      for (k in 1:dim(hp)[3]){
+        hplp_d_timecourse[i,j,k,] <- convolve1d(x=hp[i,j,k,],fir=kern,subtractMed=TRUE)
+      }
+    }
+  }
+  
+  ##############################################
+  ######## Find timecourse of all ROIs #########
+  ##############################################
+  tc_areas <- list()
+  
+  ## Extract Timecourse ##
+  for (e in 1:length(ROI_file_names)){
+    
+    ROI_transform_l<- ROI_transform[,,,e]
+    
+    ## Compute average timecourse of ROI ##
+    nTimePoints <- dim(hplp_d_timecourse)[4]
+    tc <- array(0,c(1,nTimePoints))
+    dx <- dim(hplp_d_timecourse)[1]
+    dy <- dim(hplp_d_timecourse)[2]
+    dz <- dim(hplp_d_timecourse)[3]
+    
+    ROI_transform_na<-apply(ROI_transform_l,MARGIN = c(1,2,3), FUN = function(x) ifelse(is.nan(x),0,x)) #take out NaNs
+    for (i in 1:dx) {
+      for (j in 1:dy) {
+        for (k in 1:dz) {
+          if (ROI_transform_na[i,j,k]>0) {
+            tc <- tc + t(drop(hplp_d_timecourse[i,j,k,]))
+          }
+        }}}
+    
+    #tc_focus <- tc/nnzero(ROI_transform_na)
+    tc_areas[[e]] <- tc/nnzero(ROI_transform_na)
+  }
+  
+  ################################################ 
+  ######## Perform ROI Based Correlation ######### 
+  ################################################ 
+  
+  ## COMPUTE CORRELATION MATRIX
+  connectivity_matrix_estimate<-array(dim = c(length(ROI_file_names),length(ROI_file_names)))
+  connectivity_matrix_stat<-array(dim = c(length(ROI_file_names),length(ROI_file_names)))
+  connectivity_matrix_pval<-array(dim = c(length(ROI_file_names),length(ROI_file_names)))
+  for (i in 1:length(tc_areas)){
+    for (j in 1:length(tc_areas)){
+      corr <- cor.test(x = t(tc_areas[[i]]),y = t(tc_areas[[j]]),alternative='two.sided',na.action='na.fail',method = 'pearson')
+      connectivity_matrix_estimate[i,j] <-corr$estimate
+      connectivity_matrix_stat[i,j]<-corr$statistic
+      connectivity_matrix_pval[i,j]<-corr$p.value
+    }}
+  
+  # PLOT CONNECTIVITY MATRIX
+  jet.colors <-colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan","#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+  mat<-t(apply(connectivity_matrix_estimate, 2, rev))
+  par(mar=c(1.1,1.1,1,1.1))
+  par(oma=c(0.1,0.1,0.1,0.1))
+  image(mat,axes=F,xaxt="n",yaxt="n",col=jet.colors(100))
+  title('Correlation Matrix')
+  
+  filename1<-paste(output_direc,'estimate_matrix.mat',sep='/')
+  filename2<-paste(output_direc,'stat_matrix.mat',sep='/')
+  filename3<-paste(output_direc,'pval_matrix.mat',sep='/')
+  est<-as.matrix(connectivity_matrix_estimate)
+  stat<-as.matrix(connectivity_matrix_stat)
+  pval<-as.matrix(connectivity_matrix_pval)
+  writeMat(filename1,est=est)
+  writeMat(filename2,stat=stat)
+  writeMat(filename3,pval=pval)  
+  
+  return(connectivity_matrix_estimate)
+  return(connectivity_matrix_stat)
+  return(connectivity_matrix_pval)
+  return(skippedROIs)
+}
+
+preop <- ROI_ROI_Connectivity(coreg_ROI_file,TR,noise_basis_file,folder_with_data,output_direc)
+
+##################################################
+######## Inputs PreOp - Virtual Resection ########
+##################################################
+coreg_ROI_file <- 'E:/PrePostHopf/PreSurgical/CyMu/Parcellation/virtual_resect_parcel_pre.nii'  #w/o region; in fMRI dims
+TR <- 1.99
+noise_basis_file <- 'E:/PrePostHopf/PreSurgical/CyMu/rp/noise_basis6.txt'
+folder_with_data <- 'E:/PrePostHopf/PreSurgical/CyMu/safilt_ufmri'
+output_direc <- 'E:/PrePostHopf/PreSurgical/CyMu/virtual_resection/FC'
+
+ROI_ROI_Connectivity <- function(coreg_ROI_file,TR,noise_basis_file,folder_with_data,output_direc){
+  
+  library(FIACH)
+  library(RNiftyReg)
+  library(pracma)
+  library(Matrix)
+  library(oro.nifti)
+  library(AnalyzeFMRI)
+  
+  ##########################
+  ######## Get Data ########
+  ##########################
+  ## safilt_ufmri data ##
+  confound_filename <- read.table(file = noise_basis_file,header = FALSE,sep = ' ')
+  files <- list.files(path = folder_with_data,pattern = '*.nii', full.names = TRUE)
+  func_files <- readNii(input = files, fourD = TRUE)
+  func_filename <- func_files[,,,1:dim(func_files)[4]]
+  
+  ## Take coregistered parcellation mask and make separate ROI files ##
+  coreg_ROIimg <- readNii(input = coreg_ROI_file, fourD = F)
+  
+  # Take each ROI and make new nii file
+  maxroi <- max(coreg_ROIimg)
+  C <- rep(paste(gsub('FC','',output_direc),'Parcellation/',sep = ''),maxroi) # filename for output
+  skippedROIs <-numeric()
+  for (e in 1:maxroi){ #3
+    A = array(0,c(dim(func_files)[1],dim(func_files)[2],dim(func_files)[3])) # empty output
+    coordin<-which(round(coreg_ROIimg) == e,arr.ind = T) # find roi number in mask
+    coordina<-matrix(coordin,nrow = dim(coordin)[1],ncol = dim(coordin)[2]) # make the coordinates into matrices
+    if (length(coordina)==0){
+      skippedROIs[e] <- e
+      next}
+    else{
+      for (bleep in 1:dim(coordina)[1]){
+        A[coordina[bleep,1],coordina[bleep,2],coordina[bleep,3]]=1 # turn those into 1's
+      }
+      Vfname <- paste(C[e],paste('roi',e,sep = ''),sep = '')
+      print(Vfname)
+      V <- writeNifti(file = Vfname,image = A,template = coreg_ROI_file) # output as binary nii file
+    }}
+  
+  ROI_file_names <- list.files(path = paste(gsub('FC','',output_direc),'Parcellation/',sep = ''),pattern = '^roi.*.nii', full.names = TRUE)
+  ROI_transform <- readNii(ROI_file_names,fourD = T)
+  
+  ###########################
+  ###### Detrending #########
+  ###########################
+  reshape <- matrix(func_filename, dim(func_filename)[1]*dim(func_filename)[2]*dim(func_filename)[3], byrow = F) # space x time
+  reshape2 <- t(reshape) ## time x space ##
+  
+  d_data <- detrend(x = reshape2, tt = 'linear')
+  d_timecourse <- array(t(d_data), dim=c(dim(func_filename)[1], dim(func_filename)[2], dim(func_filename)[3], dim(func_filename)[4]))
+  
+  #########################################
+  ######### Regressing out Noise ##########
+  #########################################
+  xx <- matrix(nrow = dim(d_timecourse)[4],ncol = 3) #constructing a linear quatratic
+  xx[,1] <- array(1,dim(d_timecourse)[4])
+  xx[,2] <- t(1:dim(d_timecourse)[4])/dim(d_timecourse)[4]
+  xx[,3] <- t((1:dim(d_timecourse)[4])^2)/dim(d_timecourse)[4]^2
+  
+  #wm_filename <- read.table(file = wm_timecourse,header = FALSE,sep = ' ')
+  #noise_wm_avg <- wm_filename
+  #noise_wm_demean <- noise_wm_avg-colMeans(noise_wm_avg)
+  
+  #csf_filename <- read.table(file = csf_timecourse,header = FALSE,sep = ' ')
+  #noise_csf_avg <- csf_filename
+  #noise_csf_demean <- noise_csf_avg-colMeans(noise_csf_avg)
+  
+  noise_avg <- confound_filename[1:dim(func_filename)[4],]
+  #noise_demean <- noise_avg-rowMeans(noise_avg)
+  
+  X <- cbind(xx,noise_avg) # not using csf or wm --> cbind(xx,noise_wm_demean,noise_csf_demean,noise_avg)
+  y <- d_timecourse
+  
+  y_regress_ss <- function(y,X){   #given the same name as related function in matlab
+    n <- dim(X)[1]
+    ncolX <- dim(X)[2]
+    signature(qr = "sparseQR") # makes it 'economy-size decomposition'
+    z <- qr(X,LAPACK=T)
+    Q <- qr.Q(z)
+    R <- qr.R(z)
+    perm <- z$pivot
+    p <- sum(abs(diag(R)) > max(n,ncolX)*eps(R[1]))
+    
+    if (p < ncolX) { #previously used isTRUE()
+      R <- R[1:p,1:p]
+      Q <- Q[,1:p]
+      perm <- perm[1:p]
+    }
+    
+    b <- zeros(ncolX,1)
+    b[perm] <- mldivide(A = R,B = (t(Q)%*%y))
+    yhat <- as.matrix(X)%*%b
+    r <- y-yhat
+    return(r)
+  }
+  
+  V0Cov <- array(0,dim(y))
+  for (i in 1:dim(y)[1]){
+    for (j in 1:dim(y)[2]){
+      for (k in 1:dim(y)[3]){
+        res <- y_regress_ss(drop(y[i,j,k,]),X)
+        V0Cov[i,j,k,] <- res
+      }}}
+  V0Cov[is.nan(V0Cov)]=0
+  
+  #########################################
+  #### Bandpass filter data 0.01-0.1Hz ####
+  #########################################
+  
+  ## high pass ##
+  hp <- array(0,c(dim(func_filename)[1],dim(func_filename)[2],dim(func_filename)[3],dim(func_filename)[4]))
+  for (i in 1:dim(V0Cov)[1]){
+    for (j in 1:dim(V0Cov)[2]){
+      for (k in 1:dim(V0Cov)[3]){
+        hp[i,j,k,] <- highPass(V0Cov[i,j,k,],freq = 100,tr = TR)
+      }
+    }
+  }
+  
+  ## low pass ##
+  kern <- kaiserWin(fl=0.1,tw=.025,sf=1/TR,d.sa=70,d.pbr=.1,type="low")
+  hplp_d_timecourse <- array(0,c(dim(hp)[1],dim(hp)[2],dim(hp)[3],dim(hp)[4]))
+  for (i in 1:dim(hp)[1]){
+    for (j in 1:dim(hp)[2]){
+      for (k in 1:dim(hp)[3]){
+        hplp_d_timecourse[i,j,k,] <- convolve1d(x=hp[i,j,k,],fir=kern,subtractMed=TRUE)
+      }
+    }
+  }
+  
+  ##############################################
+  ######## Find timecourse of all ROIs #########
+  ##############################################
+  tc_areas <- list()
+  
+  ## Extract Timecourse ##
+  for (e in 1:length(ROI_file_names)){
+    
+    ROI_transform_l<- ROI_transform[,,,e]
+    
+    ## Compute average timecourse of ROI ##
+    nTimePoints <- dim(hplp_d_timecourse)[4]
+    tc <- array(0,c(1,nTimePoints))
+    dx <- dim(hplp_d_timecourse)[1]
+    dy <- dim(hplp_d_timecourse)[2]
+    dz <- dim(hplp_d_timecourse)[3]
+    
+    ROI_transform_na<-apply(ROI_transform_l,MARGIN = c(1,2,3), FUN = function(x) ifelse(is.nan(x),0,x)) #take out NaNs
+    for (i in 1:dx) {
+      for (j in 1:dy) {
+        for (k in 1:dz) {
+          if (ROI_transform_na[i,j,k]>0) {
+            tc <- tc + t(drop(hplp_d_timecourse[i,j,k,]))
+          }
+        }}}
+    
+    #tc_focus <- tc/nnzero(ROI_transform_na)
+    tc_areas[[e]] <- tc/nnzero(ROI_transform_na)
+  }
+  
+  ################################################ 
+  ######## Perform ROI Based Correlation ######### 
+  ################################################ 
+  
+  ## COMPUTE CORRELATION MATRIX
+  connectivity_matrix_estimate<-array(dim = c(length(ROI_file_names),length(ROI_file_names)))
+  connectivity_matrix_stat<-array(dim = c(length(ROI_file_names),length(ROI_file_names)))
+  connectivity_matrix_pval<-array(dim = c(length(ROI_file_names),length(ROI_file_names)))
+  for (i in 1:length(tc_areas)){
+    for (j in 1:length(tc_areas)){
+      corr <- cor.test(x = t(tc_areas[[i]]),y = t(tc_areas[[j]]),alternative='two.sided',na.action='na.fail',method = 'pearson')
+      connectivity_matrix_estimate[i,j] <-corr$estimate
+      connectivity_matrix_stat[i,j]<-corr$statistic
+      connectivity_matrix_pval[i,j]<-corr$p.value
+    }}
+  
+  # PLOT CONNECTIVITY MATRIX
+  jet.colors <-colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan","#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+  mat<-t(apply(connectivity_matrix_estimate, 2, rev))
+  par(mar=c(1.1,1.1,1,1.1))
+  par(oma=c(0.1,0.1,0.1,0.1))
+  image(mat,axes=F,xaxt="n",yaxt="n",col=jet.colors(100))
+  title('Correlation Matrix')
+  
+  filename1<-paste(output_direc,'estimate_matrix.mat',sep='/')
+  filename2<-paste(output_direc,'stat_matrix.mat',sep='/')
+  filename3<-paste(output_direc,'pval_matrix.mat',sep='/')
+  est<-as.matrix(connectivity_matrix_estimate)
+  stat<-as.matrix(connectivity_matrix_stat)
+  pval<-as.matrix(connectivity_matrix_pval)
+  writeMat(filename1,est=est)
+  writeMat(filename2,stat=stat)
+  writeMat(filename3,pval=pval)  
+  
+  return(connectivity_matrix_estimate)
+  return(connectivity_matrix_stat)
+  return(connectivity_matrix_pval)
+  return(skippedROIs)
+}
+
+preop_virtual <- ROI_ROI_Connectivity(coreg_ROI_file,TR,noise_basis_file,folder_with_data,output_direc)
+
