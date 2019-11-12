@@ -1,3 +1,5 @@
+# Please contact Elhum A Shamshiri for use at: Elhum.Shamshiri@unige.ch
+
 library(FIACH)
 library(RNiftyReg)
 library(pracma)
